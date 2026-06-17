@@ -1,0 +1,217 @@
+name: build
+
+on:
+  push:
+    tags: ["v*", "chrome-*"]
+  workflow_dispatch:
+
+env:
+  # Skia as locked by Chrome 149. Bumped automatically by track.yml.
+  SKIA_REPO: https://skia.googlesource.com/skia.git
+  SKIA_SHA: 75c589e1f436688fca8f5b7f7a8affeafaa4f923
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # Skia ships built-in libFuzzer targets; ASAN via the GN toolchain.
+        # (No AFL++ leg: AFL++ is Linux-native, and GN's clang is hard to
+        # retarget to afl-clang-fast.)
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Free up disk space (Linux)
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Enable long path support (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+          New-ItemProperty -Path $key -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force | Out-Null
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang python3 ninja-build git ca-certificates
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # python and the MSVC toolchain are preinstalled; ninja is not.
+          choco install ninja -y --no-progress
+
+      - name: Set python command
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "PY=python3" >> "$GITHUB_ENV"
+          else
+            echo "PY=python" >> "$GITHUB_ENV"
+          fi
+
+      - name: Clone Skia and pin to the Chrome-locked revision
+        shell: bash
+        run: |
+          git clone --no-checkout "$SKIA_REPO" skia
+          git -C skia fetch --depth 1 origin "$SKIA_SHA"
+          git -C skia checkout FETCH_HEAD
+
+      - name: Fetch Skia third-party dependencies
+        working-directory: skia
+        shell: bash
+        run: "$PY tools/git-sync-deps"
+
+      - name: Generate build config (libFuzzer + ASAN, Linux)
+        if: runner.os == 'Linux'
+        working-directory: skia
+        shell: bash
+        run: |
+          # -g embeds DWARF in the binaries so ASAN stacks resolve to source.
+          "$PY" bin/gn gen out/Fuzz --args='
+            cc = "clang"
+            cxx = "clang++"
+            is_debug = false
+            skia_enable_fontmgr_custom_directory = false
+            skia_enable_fontmgr_custom_embedded = false
+            skia_enable_fontmgr_custom_empty = true
+            skia_use_system_freetype2 = false
+            skia_use_wuffs = true
+            skia_enable_gpu = false
+            extra_cflags = ["-fsanitize=fuzzer-no-link", "-fsanitize=address", "-g"]
+            extra_ldflags = ["-fsanitize=fuzzer", "-fsanitize=address"]
+          '
+
+      - name: Generate build config (libFuzzer + ASAN + PDB, Windows)
+        if: runner.os == 'Windows'
+        working-directory: skia
+        shell: bash
+        run: |
+          # -g emits CodeView; /DEBUG tells the linker to write a side .pdb next
+          # to each target so ASAN stacks resolve to file:line on Windows.
+          "$PY" bin/gn gen out/Fuzz --args='
+            cc = "clang-cl"
+            cxx = "clang-cl"
+            is_debug = false
+            skia_enable_fontmgr_custom_directory = false
+            skia_enable_fontmgr_custom_embedded = false
+            skia_enable_fontmgr_custom_empty = true
+            skia_use_system_freetype2 = false
+            skia_use_wuffs = true
+            skia_enable_gpu = false
+            extra_cflags = ["-fsanitize=fuzzer-no-link", "-fsanitize=address", "-g"]
+            extra_ldflags = ["-fsanitize=fuzzer", "-fsanitize=address", "/DEBUG"]
+          '
+
+      - name: Build fuzzer targets
+        working-directory: skia
+        shell: bash
+        run: |
+          mkdir -p dist
+
+          # Curated set of high-value parsing targets. Skia renames targets across
+          # revisions, so each is built independently and absent ones are skipped.
+          WANT="image_decode_incremental_png_fuzzer \
+                image_decode_incremental_jpeg_fuzzer \
+                image_decode_incremental_webp_fuzzer \
+                image_decode_incremental_gif_fuzzer \
+                image_decode_incremental_bmp_fuzzer \
+                image_decode_incremental_ico_fuzzer \
+                image_decode_incremental_wbmp_fuzzer \
+                skp_fuzzer \
+                api_textblob_fuzzer \
+                textblob_deserialize_fuzzer \
+                image_filter_deserialize_fuzzer \
+                api_gradient_fuzzer \
+                api_path_measure_fuzzer \
+                skottie_json_fuzzer \
+                sksl2glsl_fuzzer \
+                sksl2pipeline_fuzzer"
+
+          for t in $WANT; do
+            if ninja -C out/Fuzz "$t" >/tmp/skia_build.log 2>&1 && [ -f "out/Fuzz/$t" -o -f "out/Fuzz/$t.exe" ]; then
+              # Copy the binary and its Windows .pdb (if any) into dist/, keeping names.
+              cp out/Fuzz/"$t"* dist/
+            else
+              echo "::warning::target '$t' not present in this Skia revision, skipping"
+            fi
+          done
+
+          # Fallback: auto-discover real _fuzzer targets if none of the curated names matched.
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
+            echo "::notice::curated list empty, auto-discovering available _fuzzer targets"
+            available=$(ninja -C out/Fuzz -t targets all 2>/dev/null \
+                        | awk -F: '{print $1}' \
+                        | sed 's#^out/Fuzz/##' \
+                        | grep -E '_fuzzer$' \
+                        | sort -u \
+                        || true)
+            count=0
+            for t in $available; do
+              [ "$count" -ge 8 ] && break
+              if ninja -C out/Fuzz "$t" >/tmp/skia_build.log 2>&1 && [ -f "out/Fuzz/$t" -o -f "out/Fuzz/$t.exe" ]; then
+                cp out/Fuzz/"$t"* dist/
+                count=$((count + 1))
+              fi
+            done
+          fi
+
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
+            echo "::error::no fuzzer target was built"
+            exit 1
+          fi
+
+          echo "Built targets:"
+          ls -la dist/
+
+      - name: Smoke test (one run per target)
+        working-directory: skia
+        shell: bash
+        run: |
+          for t in dist/*; do
+            case "$t" in *.pdb) continue;; esac   # PDBs are not executables
+            "./$t" -runs=1 >/dev/null 2>&1 || true
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: skia-libfuzzer-${{ runner.os }}
+          path: skia/dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
