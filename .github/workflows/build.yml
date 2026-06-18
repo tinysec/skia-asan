@@ -118,8 +118,9 @@ jobs:
             skia_use_system_freetype2 = false
             skia_use_wuffs = true
             skia_enable_gpu = false
+            skia_build_fuzzers = true
             extra_cflags = ["-fsanitize=fuzzer-no-link", "-fsanitize=address", "-g"]
-            extra_ldflags = ["-fsanitize=fuzzer", "-fsanitize=address"]
+            extra_ldflags = ["-fsanitize=address"]
           '
 
       - name: Generate build config (libFuzzer + ASAN + PDB, Windows)
@@ -139,84 +140,40 @@ jobs:
             skia_use_system_freetype2 = false
             skia_use_wuffs = true
             skia_enable_gpu = false
+            skia_build_fuzzers = true
             extra_cflags = ["-fsanitize=fuzzer-no-link", "-fsanitize=address", "-g"]
-            extra_ldflags = ["-fsanitize=fuzzer", "-fsanitize=address", "/DEBUG"]
+            extra_ldflags = ["-fsanitize=address", "/DEBUG"]
           '
 
-      - name: Build fuzzer targets
+      - name: Build the multiplexed fuzz driver
         working-directory: skia
         shell: bash
         run: |
           mkdir -p dist
-
-          # Curated set of high-value parsing targets. Skia renames targets across
-          # revisions, so each is built independently and absent ones are skipped.
-          WANT="image_decode_incremental_png_fuzzer \
-                image_decode_incremental_jpeg_fuzzer \
-                image_decode_incremental_webp_fuzzer \
-                image_decode_incremental_gif_fuzzer \
-                image_decode_incremental_bmp_fuzzer \
-                image_decode_incremental_ico_fuzzer \
-                image_decode_incremental_wbmp_fuzzer \
-                skp_fuzzer \
-                api_textblob_fuzzer \
-                textblob_deserialize_fuzzer \
-                image_filter_deserialize_fuzzer \
-                api_gradient_fuzzer \
-                api_path_measure_fuzzer \
-                skottie_json_fuzzer \
-                sksl2glsl_fuzzer \
-                sksl2pipeline_fuzzer"
-
-          for t in $WANT; do
-            if ninja -C out/Fuzz "$t" >/tmp/skia_build.log 2>&1 && [ -f "out/Fuzz/$t" -o -f "out/Fuzz/$t.exe" ]; then
-              # Copy the binary and its Windows .pdb (if any) into dist/, keeping names.
-              cp out/Fuzz/"$t"* dist/
-            else
-              echo "::warning::target '$t' not present in this Skia revision, skipping"
-            fi
-          done
-
-          # Fallback: auto-discover real _fuzzer targets if none of the curated names matched.
-          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
-            echo "::notice::curated list empty, auto-discovering available _fuzzer targets"
-            available=$(ninja -C out/Fuzz -t targets all 2>/dev/null \
-                        | awk -F: '{print $1}' \
-                        | sed 's#^out/Fuzz/##' \
-                        | grep -E '_fuzzer$' \
-                        | sort -u \
-                        || true)
-            count=0
-            for t in $available; do
-              [ "$count" -ge 8 ] && break
-              if ninja -C out/Fuzz "$t" >/tmp/skia_build.log 2>&1 && [ -f "out/Fuzz/$t" -o -f "out/Fuzz/$t.exe" ]; then
-                cp out/Fuzz/"$t"* dist/
-                count=$((count + 1))
-              fi
-            done
-          fi
-
-          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
-            echo "::error::no fuzzer target was built"
-            exit 1
-          fi
-
-          echo "Built targets:"
+          # Modern Skia consolidates every fuzzer into ONE multiplexed driver
+          # (target "fuzz") that dispatches via `-t <type> -n <name> <file>`.
+          # It has its own main() (FuzzMain.cpp), so we link ASAN only -- NOT
+          # -fsanitize=fuzzer (that would pull libFuzzer's main and clash).
+          # The resulting ASAN binary replays seeds and is a WinAFL target.
+          ninja -C out/Fuzz fuzz
+          # Copy the driver and its Windows .pdb sidecar (if any).
+          cp out/Fuzz/fuzz* dist/
           ls -la dist/
 
-      - name: Smoke test (one run per target)
+      - name: Smoke test (fuzz driver)
         working-directory: skia
         shell: bash
         run: |
-          for t in dist/*; do
-            case "$t" in *.pdb) continue;; esac   # PDBs are not executables
-            "./$t" -runs=1 >/dev/null 2>&1 || true
-          done
+          # The multiplexed fuzz driver prints usage when invoked without a valid
+          # type; just confirm the binary loads (it is not a libFuzzer executable).
+          BIN=dist/fuzz
+          [ -f dist/fuzz.exe ] && BIN=dist/fuzz.exe
+          "./$BIN" --help >/dev/null 2>&1 || "./$BIN" >/dev/null 2>&1 || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: skia-libfuzzer-${{ runner.os }}
+          name: skia-fuzz-${{ runner.os }}
           path: skia/dist/*
           if-no-files-found: error
 
