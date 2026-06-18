@@ -60,7 +60,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang python3 ninja-build git ca-certificates
+            build-essential clang python3 ninja-build git ca-certificates \
+            libfontconfig1-dev
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
