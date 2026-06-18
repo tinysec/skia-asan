@@ -260,9 +260,34 @@ jobs:
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Pack each artifact into a zip
+        # GitHub release assets are FLAT: a file's release path is just its
+        # basename and the directory structure is stripped. That breaks a direct
+        # upload of Skia's artifact in two ways:
+        #   1. intra-artifact duplicate basenames -- Skia's include/ tree ships
+        #      hundreds of BUILD.bazel / OWNERS / vululkan_structs.hpp files
+        #      repeated across subdirs. A flat upload collapses them into one
+        #      asset (later upload wins), and softprops 404s on the stale
+        #      metadata update ("error updating release asset metadata ...
+        #      Not Found"), which FAILS the release job.
+        #   2. cross-artifact duplicate basenames -- both legs ship the SAME
+        #      public headers (SkCanvas.h etc.), which collide when both
+        #      artifacts are uploaded flat.
+        # Packing each artifact into ONE per-platform zip sidesteps both:
+        # every asset gets a unique name, and the lib/ + include/ + fuzz/ tree
+        # the consumer needs is preserved inside the archive.
+        run: |
+          mkdir -p out
+          for d in artifacts/*/; do
+            name=$(basename "$d")
+            (cd artifacts && zip -rq "../out/${name}-${{ steps.tag.outputs.tag }}.zip" "$name")
+          done
+          echo "--- release zips ---"
+          ls -la out
+
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
-          files: artifacts/**/*
+          files: out/*.zip
