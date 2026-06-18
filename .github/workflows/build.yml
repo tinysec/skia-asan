@@ -59,9 +59,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # libgl1-mesa-dev / libglu1-mesa-dev provide GL/gl.h and GL/glx.h.
+          # Skia compiles src/gpu/ganesh/gl/glx/GrGLMakeGLXInterface.cpp even
+          # with skia_enable_gpu=false, and the free-disk-space step removes the
+          # mesa DRI runtime, so the dev headers must be (re)installed here.
           sudo apt-get install -y --no-install-recommends \
             build-essential clang python3 ninja-build git ca-certificates \
-            libfontconfig1-dev
+            libfontconfig1-dev libgl1-mesa-dev libglu1-mesa-dev
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
@@ -137,6 +141,13 @@ jobs:
           # -g emits CodeView; /DEBUG writes a side .pdb so ASAN stacks resolve
           # to file:line. clang-cl + /MT (GN static-CRT default) is the required
           # combo for clang-cl ASAN on Windows.
+          # NOTE: skia_build_fuzzers is Linux-only. On Windows Skia's GN leaves
+          # is_clang=false (the is_clang arg does not override for the MSVC-ABI
+          # toolchain), so skia_build_fuzzers=true trips `assert(is_clang)` in
+          # BUILD.gn. Windows therefore ships the `skia` ASAN static library
+          # only -- which is the correct artifact for WinAFL anyway (link it
+          # into your own harness). SanitizerCoverage stays on via fuzzer-no-link
+          # so a downstream libFuzzer/WinAFL harness still gets coverage.
           "$GN" gen out/Fuzz --args='
             cc = "clang-cl"
             cxx = "clang-cl"
@@ -148,7 +159,6 @@ jobs:
             skia_use_system_freetype2 = false
             skia_use_wuffs = true
             skia_enable_gpu = false
-            skia_build_fuzzers = true
             extra_cflags = ["-fsanitize=fuzzer-no-link", "-fsanitize=address", "-g"]
             extra_ldflags = ["-fsanitize=address", "/DEBUG"]
           '
@@ -158,21 +168,24 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/lib/include dist/fuzz
-          # `skia` is the static library (libskia.a / skia.lib); `fuzz` is the
-          # multiplexed fuzz driver (own main(), replays seeds, WinAFL target).
-          # Skia's GN does not produce a single clean shared library (component
-          # build fragments into hundreds of files), so only the static lib is
-          # shipped. NOTE: `fuzz` is an ASAN fuzz EXECUTABLE, not a libFuzzer-
-          # engine binary -- a true libFuzzer skia target needs extra GN work.
+          # `skia` is the static library (libskia.a / skia.lib) -- the primary
+          # ASAN artifact on BOTH platforms (link into your own harness).
+          # `fuzz` is the multiplexed fuzz driver (own main(), replays seeds) and
+          # is built on Linux only: on Windows Skia's GN leaves is_clang=false,
+          # so the fuzz-driver targets (assert(is_clang)) are unavailable there.
+          # NOTE: `fuzz` is an ASAN fuzz EXECUTABLE, not a libFuzzer-engine
+          # binary -- a true libFuzzer skia target needs extra GN work.
           ninja -C out/Fuzz skia
-          ninja -C out/Fuzz fuzz
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            ninja -C out/Fuzz fuzz
+          fi
 
           find out/Fuzz -maxdepth 1 -type f \
             \( -name 'libskia.a' -o -name 'skia.lib' -o -name 'libskia*.pdb' \) \
             -exec cp {} dist/lib/ \;
           find out/Fuzz -maxdepth 1 -type f \
             \( -name 'fuzz' -o -name 'fuzz.exe' -o -name 'fuzz*.pdb' \) \
-            -exec cp {} dist/fuzz/ \;
+            -exec cp {} dist/fuzz/ 2>/dev/null || true
           # Public headers live under include/.
           cp -r include/* dist/lib/include/ 2>/dev/null || true
           ls -la dist/lib dist/fuzz
@@ -182,11 +195,16 @@ jobs:
         shell: bash
         run: |
           STAT=$(find dist/lib -maxdepth 1 -type f \( -name 'libskia.a' -o -name 'skia.lib' \) | head -1)
-          FZ=$(find dist/fuzz -maxdepth 1 -type f \( -name 'fuzz' -o -name 'fuzz.exe' \) | head -1)
           test -n "$STAT" || { echo "ERROR: libskia missing"; exit 1; }
-          test -n "$FZ"   || { echo "ERROR: fuzz driver missing"; exit 1; }
           echo "static-lib: $STAT"
-          echo "fuzz-driver: $FZ"
+          # The fuzz driver is Linux-only (see build step comment).
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            FZ=$(find dist/fuzz -maxdepth 1 -type f -name 'fuzz' | head -1)
+            test -n "$FZ" || { echo "ERROR: fuzz driver missing"; exit 1; }
+            echo "fuzz-driver: $FZ"
+          else
+            echo "fuzz-driver: (skipped on Windows -- skia GN asserts is_clang)"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
