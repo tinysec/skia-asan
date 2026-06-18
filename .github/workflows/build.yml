@@ -66,6 +66,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential clang python3 ninja-build git ca-certificates \
             libfontconfig1-dev libgl1-mesa-dev libglu1-mesa-dev
+          # The fuzz driver links with -fsanitize=address, which needs the
+          # clang ASAN runtime archives (libclang_rt.asan*.a). The apt 'clang'
+          # package ships clang itself but NOT the runtime -- it is split into
+          # a separate libclang-rt-<v>-dev package -- so install the runtime
+          # package matching the installed clang version, else the fuzz link
+          # fails with 'cannot find .../libclang_rt.asan-x86_64.a'.
+          CLANG_MAJOR=$(clang -dumpversion | cut -d. -f1)
+          sudo apt-get install -y --no-install-recommends "libclang-rt-${CLANG_MAJOR}-dev"
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
