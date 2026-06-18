@@ -78,6 +78,14 @@ jobs:
             echo "PY=python" >> "$GITHUB_ENV"
           fi
 
+      - name: Install depot_tools (for the gn bootstrap)
+        shell: bash
+        run: |
+          # Skia ships bin/gn as a prebuilt binary at this revision, not a Python
+          # launcher, so invoke gn from depot_tools instead (cross-platform).
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> "$GITHUB_PATH"
+
       - name: Clone Skia and pin to the Chrome-locked revision
         shell: bash
         run: |
@@ -96,7 +104,7 @@ jobs:
         shell: bash
         run: |
           # -g embeds DWARF in the binaries so ASAN stacks resolve to source.
-          "$PY" bin/gn gen out/Fuzz --args='
+          gn gen out/Fuzz --args='
             cc = "clang"
             cxx = "clang++"
             is_debug = false
@@ -117,7 +125,7 @@ jobs:
         run: |
           # -g emits CodeView; /DEBUG tells the linker to write a side .pdb next
           # to each target so ASAN stacks resolve to file:line on Windows.
-          "$PY" bin/gn gen out/Fuzz --args='
+          gn gen out/Fuzz --args='
             cc = "clang-cl"
             cxx = "clang-cl"
             is_debug = false
