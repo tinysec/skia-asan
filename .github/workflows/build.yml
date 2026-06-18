@@ -103,12 +103,16 @@ jobs:
           if [ -f bin/gn.exe ]; then GN=bin/gn.exe; fi
           echo "GN=$PWD/$GN" >> "$GITHUB_ENV"
 
-      - name: Generate build config (libFuzzer + ASAN, Linux)
+      - name: Generate build config (ASAN + coverage, Linux)
         if: runner.os == 'Linux'
         working-directory: skia
         shell: bash
         run: |
-          # -g embeds DWARF in the binaries so ASAN stacks resolve to source.
+          # One GN config builds BOTH the `skia` static library and the `fuzz`
+          # driver from the same object tree. -g embeds DWARF for ASAN stacks.
+          # fuzzer-no-link adds SanitizerCoverage so the lib is useful to a
+          # libFuzzer/AFL++ harness; the `fuzz` driver has its own main(), so we
+          # link ASAN only (NOT -fsanitize=fuzzer -- that would clash with main).
           "$GN" gen out/Fuzz --args='
             cc = "clang"
             cxx = "clang++"
@@ -125,20 +129,18 @@ jobs:
             extra_ldflags = ["-fsanitize=address"]
           '
 
-      - name: Generate build config (libFuzzer + ASAN + PDB, Windows)
+      - name: Generate build config (ASAN + coverage, Windows)
         if: runner.os == 'Windows'
         working-directory: skia
         shell: bash
         run: |
-          # -g emits CodeView; /DEBUG tells the linker to write a side .pdb next
-          # to each target so ASAN stacks resolve to file:line on Windows.
+          # -g emits CodeView; /DEBUG writes a side .pdb so ASAN stacks resolve
+          # to file:line. clang-cl + /MT (GN static-CRT default) is the required
+          # combo for clang-cl ASAN on Windows.
           "$GN" gen out/Fuzz --args='
             cc = "clang-cl"
             cxx = "clang-cl"
             is_debug = false
-            # On Windows, GN defaults is_clang=false (MSVC toolchain); setting
-            # cc/cxx to clang-cl does not flip it. The fuzzer block asserts
-            # is_clang, so set it explicitly.
             is_clang = true
             skia_enable_fontmgr_custom_directory = false
             skia_enable_fontmgr_custom_embedded = false
@@ -151,36 +153,46 @@ jobs:
             extra_ldflags = ["-fsanitize=address", "/DEBUG"]
           '
 
-      - name: Build the multiplexed fuzz driver
+      - name: Build Skia static library + fuzz driver
         working-directory: skia
         shell: bash
         run: |
-          mkdir -p dist
-          # Modern Skia consolidates every fuzzer into ONE multiplexed driver
-          # (target "fuzz") that dispatches via `-t <type> -n <name> <file>`.
-          # It has its own main() (FuzzMain.cpp), so we link ASAN only -- NOT
-          # -fsanitize=fuzzer (that would pull libFuzzer's main and clash).
-          # The resulting ASAN binary replays seeds and is a WinAFL target.
+          mkdir -p dist/lib/include dist/fuzz
+          # `skia` is the static library (libskia.a / skia.lib); `fuzz` is the
+          # multiplexed fuzz driver (own main(), replays seeds, WinAFL target).
+          # Skia's GN does not produce a single clean shared library (component
+          # build fragments into hundreds of files), so only the static lib is
+          # shipped. NOTE: `fuzz` is an ASAN fuzz EXECUTABLE, not a libFuzzer-
+          # engine binary -- a true libFuzzer skia target needs extra GN work.
+          ninja -C out/Fuzz skia
           ninja -C out/Fuzz fuzz
-          # Copy the driver and its Windows .pdb sidecar (if any).
-          cp out/Fuzz/fuzz* dist/
-          ls -la dist/
 
-      - name: Smoke test (fuzz driver)
+          find out/Fuzz -maxdepth 1 -type f \
+            \( -name 'libskia.a' -o -name 'skia.lib' -o -name 'libskia*.pdb' \) \
+            -exec cp {} dist/lib/ \;
+          find out/Fuzz -maxdepth 1 -type f \
+            \( -name 'fuzz' -o -name 'fuzz.exe' -o -name 'fuzz*.pdb' \) \
+            -exec cp {} dist/fuzz/ \;
+          # Public headers live under include/.
+          cp -r include/* dist/lib/include/ 2>/dev/null || true
+          ls -la dist/lib dist/fuzz
+
+      - name: Verify artifacts
         working-directory: skia
         shell: bash
         run: |
-          # The multiplexed fuzz driver prints usage when invoked without a valid
-          # type; just confirm the binary loads (it is not a libFuzzer executable).
-          BIN=dist/fuzz
-          [ -f dist/fuzz.exe ] && BIN=dist/fuzz.exe
-          "./$BIN" --help >/dev/null 2>&1 || "./$BIN" >/dev/null 2>&1 || true
+          STAT=$(find dist/lib -maxdepth 1 -type f \( -name 'libskia.a' -o -name 'skia.lib' \) | head -1)
+          FZ=$(find dist/fuzz -maxdepth 1 -type f \( -name 'fuzz' -o -name 'fuzz.exe' \) | head -1)
+          test -n "$STAT" || { echo "ERROR: libskia missing"; exit 1; }
+          test -n "$FZ"   || { echo "ERROR: fuzz driver missing"; exit 1; }
+          echo "static-lib: $STAT"
+          echo "fuzz-driver: $FZ"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: skia-fuzz-${{ runner.os }}
-          path: skia/dist/*
+          name: skia-asan-${{ runner.os }}
+          path: skia/dist
           if-no-files-found: error
 
   release:
