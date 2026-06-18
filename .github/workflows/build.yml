@@ -78,14 +78,6 @@ jobs:
             echo "PY=python" >> "$GITHUB_ENV"
           fi
 
-      - name: Install depot_tools (for the gn bootstrap)
-        shell: bash
-        run: |
-          # Skia ships bin/gn as a prebuilt binary at this revision, not a Python
-          # launcher, so invoke gn from depot_tools instead (cross-platform).
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$PWD/depot_tools" >> "$GITHUB_PATH"
-
       - name: Clone Skia and pin to the Chrome-locked revision
         shell: bash
         run: |
@@ -98,13 +90,25 @@ jobs:
         shell: bash
         run: "$PY tools/git-sync-deps"
 
+      - name: Fetch prebuilt gn binary
+        working-directory: skia
+        shell: bash
+        run: |
+          # bin/gn is not checked into the Skia repo. bin/fetch-gn downloads a
+          # pinned prebuilt gn from chrome-infra (Linux, macOS, Windows) into bin/.
+          "$PY" bin/fetch-gn
+          # Resolve the exact name (gn on POSIX, gn.exe on Windows) to an abs path.
+          GN=bin/gn
+          if [ -f bin/gn.exe ]; then GN=bin/gn.exe; fi
+          echo "GN=$PWD/$GN" >> "$GITHUB_ENV"
+
       - name: Generate build config (libFuzzer + ASAN, Linux)
         if: runner.os == 'Linux'
         working-directory: skia
         shell: bash
         run: |
           # -g embeds DWARF in the binaries so ASAN stacks resolve to source.
-          gn gen out/Fuzz --args='
+          "$GN" gen out/Fuzz --args='
             cc = "clang"
             cxx = "clang++"
             is_debug = false
@@ -125,7 +129,7 @@ jobs:
         run: |
           # -g emits CodeView; /DEBUG tells the linker to write a side .pdb next
           # to each target so ASAN stacks resolve to file:line on Windows.
-          gn gen out/Fuzz --args='
+          "$GN" gen out/Fuzz --args='
             cc = "clang-cl"
             cxx = "clang-cl"
             is_debug = false
