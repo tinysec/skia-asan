@@ -10,9 +10,8 @@ on:
         required: false
 
 env:
-  # Skia as locked by Chrome 149. Bumped automatically by track.yml.
+  # The Chrome-locked Skia SHA lives in chrome.lock (written by track.yml).
   SKIA_REPO: https://skia.googlesource.com/skia.git
-  SKIA_SHA: 75c589e1f436688fca8f5b7f7a8affeafaa4f923
 
 jobs:
   build:
@@ -41,6 +40,12 @@ jobs:
 
       - name: Checkout this repository
         uses: actions/checkout@v4
+
+      - name: Read Chrome-locked revision from chrome.lock
+        id: lock
+        shell: bash
+        run: |
+          echo "sha=$(jq -r .sha chrome.lock)" >> "$GITHUB_OUTPUT"
 
       - name: Enable long path support (Windows)
         if: runner.os == 'Windows'
@@ -77,7 +82,7 @@ jobs:
         shell: bash
         run: |
           git clone --no-checkout "$SKIA_REPO" skia
-          git -C skia fetch --depth 1 origin "$SKIA_SHA"
+          git -C skia fetch --depth 1 origin "${{ steps.lock.outputs.sha }}"
           git -C skia checkout FETCH_HEAD
 
       - name: Fetch Skia third-party dependencies
