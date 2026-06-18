@@ -188,12 +188,30 @@ jobs:
             ninja -C out/Fuzz fuzz
           fi
 
+          # Diagnostic: list the build root so the fuzz driver's actual path
+          # is visible in the log. Past runs linked fuzz ([715/715] link fuzz)
+          # yet the copy below found nothing at out/Fuzz/fuzz -- this listing
+          # removes the guesswork if that ever recurs.
+          echo "--- out/Fuzz root contents ---"
+          ls -la out/Fuzz | head -80
+
           find out/Fuzz -maxdepth 1 -type f \
             \( -name 'libskia.a' -o -name 'skia.lib' -o -name 'libskia*.pdb' \) \
             -exec cp {} dist/lib/ \;
-          find out/Fuzz -maxdepth 1 -type f \
-            \( -name 'fuzz' -o -name 'fuzz.exe' -o -name 'fuzz*.pdb' \) \
-            -exec cp {} dist/fuzz/ 2>/dev/null || true
+
+          # The fuzz driver is Linux-only. `link fuzz` succeeds but the binary
+          # is not guaranteed to sit at out/Fuzz/fuzz (maxdepth 1) on every
+          # skia revision, so search the WHOLE build tree instead of assuming
+          # the root path, and echo every match for traceability.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "--- fuzz candidates anywhere under out/Fuzz ---"
+            find out/Fuzz -type f \( -name 'fuzz' -o -name 'fuzz.exe' \) -ls
+            find out/Fuzz -type f \( -name 'fuzz' -o -name 'fuzz.exe' \) \
+              -exec cp {} dist/fuzz/ \;
+            find out/Fuzz -type f -name 'fuzz*.pdb' \
+              -exec cp {} dist/fuzz/ \; 2>/dev/null || true
+          fi
+
           # Public headers live under include/.
           cp -r include/* dist/lib/include/ 2>/dev/null || true
           ls -la dist/lib dist/fuzz
