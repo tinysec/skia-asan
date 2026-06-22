@@ -12,13 +12,13 @@ ASAN-instrumented build of **Skia** — Chrome's 2D graphics and image-decoding 
 ships (Skia is pinned directly in Chrome DEPS). The
 [`track-chrome`](.github/workflows/track.yml) workflow runs every 6 hours: it
 resolves the latest Chrome stable, reads the Skia SHA from Chrome DEPS, and
-when it has changed it bumps `chrome.lock`, tags `chrome-<version>`, and
-triggers [`build`](.github/workflows/build.yml). Each `chrome-<version>` tag
+when it has changed it bumps `chrome.lock`, tags `skia-<sha8>`, and
+triggers [`build`](.github/workflows/build.yml). Each `skia-<sha8>` tag
 becomes a GitHub release.
 
 ## Release artifacts
 
-Each release is published at its `chrome-<version>` tag as **one zip per
+Each release is published at its `skia-<sha8>` tag as **one zip per
 platform** (so the full `include/` header tree is preserved without name
 collisions in GitHub's flat asset namespace). Each zip contains:
 
